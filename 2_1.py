@@ -1,6 +1,5 @@
 # Task 2.1 - Regresie Logistica: Crazy Sauce dat fiind Crazy Schnitzel
 # Clasificare binara - prezice daca clientul ia sosul impreuna cu schnitzelul
-# Ziua 1 - Structura de baza si incarcarea datelor
 
 import numpy as np
 import pandas as pd
