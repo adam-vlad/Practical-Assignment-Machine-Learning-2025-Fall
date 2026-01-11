@@ -3,14 +3,16 @@
 
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
 
 
 class LogisticRegression:
-    """Regresie logistica implementata manual cu gradient descent."""
+    """Regresie logistica implementata manual cu gradient descent si metoda Newton."""
     
-    def __init__(self, lr=0.1, n_iter=1000, reg='l2', lambda_=0.01, tol=1e-6):
+    def __init__(self, lr=0.1, n_iter=1000, method='gd', reg='l2', lambda_=0.01, tol=1e-6):
         self.lr = lr
         self.n_iter = n_iter
+        self.method = method
         self.reg = reg
         self.lambda_ = lambda_
         self.tol = tol
@@ -29,6 +31,42 @@ class LogisticRegression:
             loss += (self.lambda_ / 2) * np.sum(self.w ** 2)
         return loss
     
+    def _gradient_descent_step(self, X, y):
+        n = X.shape[0]
+        y_pred = self._sigmoid(X @ self.w + self.b)
+        
+        dw = (1/n) * (X.T @ (y_pred - y))
+        db = (1/n) * np.sum(y_pred - y)
+        
+        if self.reg == 'l2':
+            dw += self.lambda_ * self.w
+        
+        self.w -= self.lr * dw
+        self.b -= self.lr * db
+        return y_pred
+    
+    def _newton_step(self, X, y):
+        n = X.shape[0]
+        y_pred = self._sigmoid(X @ self.w + self.b)
+        
+        gradient = (1/n) * (X.T @ (y_pred - y))
+        if self.reg == 'l2':
+            gradient += self.lambda_ * self.w
+        
+        # matricea Hessian
+        d = y_pred * (1 - y_pred)
+        d = np.clip(d, 1e-10, None)
+        H = (1/n) * (X.T @ np.diag(d) @ X)
+        H += (self.lambda_ + 1e-5) * np.eye(H.shape[0])
+        
+        try:
+            self.w -= np.linalg.solve(H, gradient)
+        except:
+            self.w -= self.lr * gradient
+        
+        self.b -= self.lr * np.mean(y_pred - y)
+        return y_pred
+    
     def fit(self, X, y, verbose=True):
         n_samples, n_features = X.shape
         self.w = np.zeros(n_features)
@@ -36,17 +74,10 @@ class LogisticRegression:
         self.loss_history = []
         
         for i in range(self.n_iter):
-            y_pred = self._sigmoid(X @ self.w + self.b)
-            
-            # gradient descent step
-            dw = (1/n_samples) * (X.T @ (y_pred - y))
-            db = (1/n_samples) * np.sum(y_pred - y)
-            
-            if self.reg == 'l2':
-                dw += self.lambda_ * self.w
-            
-            self.w -= self.lr * dw
-            self.b -= self.lr * db
+            if self.method == 'newton':
+                y_pred = self._newton_step(X, y)
+            else:
+                y_pred = self._gradient_descent_step(X, y)
             
             loss = self._loss(y, y_pred)
             self.loss_history.append(loss)
@@ -68,11 +99,7 @@ class LogisticRegression:
         return (self.predict_proba(X) >= threshold).astype(int)
 
 
-# Metrici de baza
-
-def accuracy(y_true, y_pred):
-    return np.mean(y_true == y_pred)
-
+# Metrici
 
 def confusion_matrix(y_true, y_pred):
     tp = np.sum((y_true == 1) & (y_pred == 1))
@@ -82,7 +109,124 @@ def confusion_matrix(y_true, y_pred):
     return np.array([[tn, fp], [fn, tp]])
 
 
-# Preprocesare
+def accuracy(y_true, y_pred):
+    return np.mean(y_true == y_pred)
+
+
+def precision(y_true, y_pred):
+    tp = np.sum((y_true == 1) & (y_pred == 1))
+    fp = np.sum((y_true == 0) & (y_pred == 1))
+    return tp / (tp + fp) if (tp + fp) > 0 else 0
+
+
+def recall(y_true, y_pred):
+    tp = np.sum((y_true == 1) & (y_pred == 1))
+    fn = np.sum((y_true == 1) & (y_pred == 0))
+    return tp / (tp + fn) if (tp + fn) > 0 else 0
+
+
+def f1_score(y_true, y_pred):
+    p, r = precision(y_true, y_pred), recall(y_true, y_pred)
+    return 2 * p * r / (p + r) if (p + r) > 0 else 0
+
+
+def roc_auc(y_true, y_proba):
+    sorted_idx = np.argsort(y_proba)[::-1]
+    y_sorted = y_true[sorted_idx]
+    
+    tpr_list, fpr_list = [0], [0]
+    tp, fp = 0, 0
+    pos, neg = np.sum(y_true == 1), np.sum(y_true == 0)
+    
+    for label in y_sorted:
+        if label == 1:
+            tp += 1
+        else:
+            fp += 1
+        tpr_list.append(tp / pos if pos > 0 else 0)
+        fpr_list.append(fp / neg if neg > 0 else 0)
+    
+    auc = sum((fpr_list[i] - fpr_list[i-1]) * (tpr_list[i] + tpr_list[i-1]) / 2 
+              for i in range(1, len(fpr_list)))
+    return auc, fpr_list, tpr_list
+
+
+def evaluate(y_true, y_pred, y_proba=None):
+    results = {
+        'accuracy': accuracy(y_true, y_pred),
+        'precision': precision(y_true, y_pred),
+        'recall': recall(y_true, y_pred),
+        'f1': f1_score(y_true, y_pred),
+        'cm': confusion_matrix(y_true, y_pred)
+    }
+    if y_proba is not None:
+        results['auc'], results['fpr'], results['tpr'] = roc_auc(y_true, y_proba)
+    return results
+
+
+def print_metrics(results, title="Rezultate"):
+    print(f"\n{'='*50}")
+    print(title)
+    print('='*50)
+    print(f"Accuracy:  {results['accuracy']:.4f}")
+    print(f"Precision: {results['precision']:.4f}")
+    print(f"Recall:    {results['recall']:.4f}")
+    print(f"F1-Score:  {results['f1']:.4f}")
+    if 'auc' in results:
+        print(f"ROC-AUC:   {results['auc']:.4f}")
+    print(f"\nMatrice de confuzie:")
+    print(f"              Pred 0  Pred 1")
+    print(f"  Actual 0     {results['cm'][0,0]:4d}    {results['cm'][0,1]:4d}")
+    print(f"  Actual 1     {results['cm'][1,0]:4d}    {results['cm'][1,1]:4d}")
+
+
+# Ploturi
+
+def plot_loss(loss_history):
+    plt.figure(figsize=(10, 5))
+    plt.plot(loss_history, 'b-', lw=2)
+    plt.xlabel('Iteratie')
+    plt.ylabel('Loss')
+    plt.title('Curba de loss - Gradient Descent')
+    plt.grid(True, alpha=0.3)
+    plt.savefig('2_1_loss_curve.png', dpi=150)
+    plt.close()
+    print("Salvat: 2_1_loss_curve.png")
+
+
+def plot_roc(fpr, tpr, auc_val):
+    plt.figure(figsize=(8, 8))
+    plt.plot(fpr, tpr, 'b-', lw=2, label=f'ROC (AUC = {auc_val:.4f})')
+    plt.plot([0, 1], [0, 1], 'r--', lw=1, label='Random')
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title('Curba ROC')
+    plt.legend(loc='lower right')
+    plt.grid(True, alpha=0.3)
+    plt.savefig('2_1_roc_curve.png', dpi=150)
+    plt.close()
+    print("Salvat: 2_1_roc_curve.png")
+
+
+def plot_confusion_matrix(cm):
+    plt.figure(figsize=(6, 5))
+    plt.imshow(cm, cmap='Blues')
+    plt.colorbar()
+    plt.xticks([0, 1], ['Fara sos', 'Cu sos'])
+    plt.yticks([0, 1], ['Fara sos', 'Cu sos'])
+    plt.xlabel('Predictie')
+    plt.ylabel('Real')
+    plt.title('Matrice de confuzie')
+    for i in range(2):
+        for j in range(2):
+            color = 'white' if cm[i,j] > cm.max()/2 else 'black'
+            plt.text(j, i, cm[i,j], ha='center', va='center', color=color, fontsize=16)
+    plt.savefig('2_1_confusion_matrix.png', dpi=150)
+    plt.close()
+    print("Salvat: 2_1_confusion_matrix.png")
+
+
+# Preprocesare date
 
 def load_and_preprocess(filepath='ap_dataset.csv'):
     print("="*60)
@@ -162,7 +306,6 @@ if __name__ == "__main__":
     X_train, y_train = df_train[feature_cols].values, df_train['y'].values
     X_test, y_test = df_test[feature_cols].values, df_test['y'].values
     
-    # normalizare
     mu, sigma = X_train.mean(axis=0), X_train.std(axis=0)
     sigma[sigma == 0] = 1
     X_train_n = (X_train - mu) / sigma
@@ -171,27 +314,43 @@ if __name__ == "__main__":
     # baseline
     majority = np.bincount(y_train).argmax()
     baseline_pred = np.full_like(y_test, majority)
-    baseline_acc = accuracy(y_test, baseline_pred)
+    baseline_acc = np.mean(y_test == baseline_pred)
     print(f"\nBASELINE (clasa majoritara = {majority}): Accuracy = {baseline_acc:.4f}")
     
-    # antrenare model
+    # gradient descent
     print(f"\n{'='*50}")
     print("REGRESIE LOGISTICA (Gradient Descent)")
     print('='*50)
+    model_gd = LogisticRegression(lr=0.1, n_iter=1000, method='gd', reg='l2', lambda_=0.01)
+    model_gd.fit(X_train_n, y_train, verbose=True)
     
-    model = LogisticRegression(lr=0.1, n_iter=1000, reg='l2', lambda_=0.01)
-    model.fit(X_train_n, y_train, verbose=True)
+    y_pred_gd = model_gd.predict(X_test_n)
+    y_proba_gd = model_gd.predict_proba(X_test_n)
     
-    y_pred = model.predict(X_test_n)
-    acc = accuracy(y_test, y_pred)
-    cm = confusion_matrix(y_test, y_pred)
+    results_gd = evaluate(y_test, y_pred_gd, y_proba_gd)
+    print_metrics(results_gd, "Rezultate - Gradient Descent")
     
-    print(f"\nAccuracy pe test: {acc:.4f}")
-    print(f"\nMatrice de confuzie:")
-    print(f"              Pred 0  Pred 1")
-    print(f"  Actual 0     {cm[0,0]:4d}    {cm[0,1]:4d}")
-    print(f"  Actual 1     {cm[1,0]:4d}    {cm[1,1]:4d}")
+    # metoda Newton
+    print(f"\n{'='*50}")
+    print("REGRESIE LOGISTICA (Metoda Newton)")
+    print('='*50)
+    model_newton = LogisticRegression(lr=1.0, n_iter=50, method='newton', reg='l2', lambda_=0.1)
+    model_newton.fit(X_train_n, y_train, verbose=True)
+    
+    y_pred_newton = model_newton.predict(X_test_n)
+    y_proba_newton = model_newton.predict_proba(X_test_n)
+    
+    results_newton = evaluate(y_test, y_pred_newton, y_proba_newton)
+    print_metrics(results_newton, "Rezultate - Metoda Newton")
+    
+    # grafice
+    print(f"\n{'='*50}")
+    print("GENERARE GRAFICE")
+    print('='*50)
+    plot_loss(model_gd.loss_history)
+    plot_roc(results_gd['fpr'], results_gd['tpr'], results_gd['auc'])
+    plot_confusion_matrix(results_gd['cm'])
     
     print("\n" + "="*60)
-    print("TODO Ziua 4: Adaugare metoda Newton + metrici complete + grafice")
+    print("TODO Ziua 5: Adaugare interpretare coeficienti + finalizare")
     print("="*60)
