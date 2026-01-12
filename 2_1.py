@@ -146,6 +146,7 @@ def roc_auc(y_true, y_proba):
         tpr_list.append(tp / pos if pos > 0 else 0)
         fpr_list.append(fp / neg if neg > 0 else 0)
     
+    # aria sub curba cu regula trapezului
     auc = sum((fpr_list[i] - fpr_list[i-1]) * (tpr_list[i] + tpr_list[i-1]) / 2 
               for i in range(1, len(fpr_list)))
     return auc, fpr_list, tpr_list
@@ -226,6 +227,26 @@ def plot_confusion_matrix(cm):
     print("Salvat: 2_1_confusion_matrix.png")
 
 
+def plot_coefficients(w, feature_names, top_n=20):
+    importance = pd.DataFrame({'feature': feature_names, 'coef': w})
+    importance = importance.reindex(importance['coef'].abs().sort_values(ascending=False).index)
+    top = importance.head(top_n)
+    
+    plt.figure(figsize=(10, 8))
+    colors = ['green' if c > 0 else 'red' for c in top['coef']]
+    plt.barh(range(len(top)), top['coef'], color=colors)
+    plt.yticks(range(len(top)), top['feature'])
+    plt.xlabel('Coeficient')
+    plt.title(f'Top {top_n} features (verde = creste prob, rosu = scade prob)')
+    plt.gca().invert_yaxis()
+    plt.tight_layout()
+    plt.savefig('2_1_coefficients.png', dpi=150)
+    plt.close()
+    print("Salvat: 2_1_coefficients.png")
+    
+    return importance
+
+
 # Preprocesare date
 
 def load_and_preprocess(filepath='ap_dataset.csv'):
@@ -239,6 +260,7 @@ def load_and_preprocess(filepath='ap_dataset.csv'):
     TARGET_SAUCE = 'Crazy Sauce'
     TARGET_PRODUCT = 'Crazy Schnitzel'
     
+    # filtram doar bonurile care contin Crazy Schnitzel
     receipts_with_cs = df[df['retail_product_name'] == TARGET_PRODUCT]['id_bon'].unique()
     print(f"Bonuri cu {TARGET_PRODUCT}: {len(receipts_with_cs)}")
     
@@ -247,25 +269,34 @@ def load_and_preprocess(filepath='ap_dataset.csv'):
     all_products = df['retail_product_name'].unique()
     products_for_features = [p for p in all_products if p != TARGET_SAUCE]
     
+    # categorii pentru features de interactiune
     sides = [p for p in all_products if any(kw in p.lower() for kw in ['potato', 'fries', 'cartofi'])]
     drinks = [p for p in all_products if any(kw in p for kw in ['Pepsi', 'Cola', 'Dew', 'Aqua', 'Fanta', 'Mirinda', 'Limonada'])]
     
+    print(f"Garnituri gasite: {sides}")
+    print(f"Bauturi gasite (primele 5): {drinks[:5]}")
+    
+    # construim features pentru fiecare bon
     data = []
     for id_bon in receipts_with_cs:
         receipt = df_filtered[df_filtered['id_bon'] == id_bon]
         row = {}
         
+        # target
         row['y'] = 1 if TARGET_SAUCE in receipt['retail_product_name'].values else 0
         
+        # features temporale
         dt = pd.to_datetime(receipt['data_bon'].iloc[0])
         row['day_of_week'] = dt.dayofweek + 1
         row['hour'] = dt.hour
         row['is_weekend'] = 1 if dt.dayofweek >= 5 else 0
         
+        # features agregate
         row['cart_size'] = len(receipt)
         row['distinct_products'] = receipt['retail_product_name'].nunique()
         row['total_value'] = receipt['SalePriceWithVAT'].sum()
         
+        # vectorul de produse
         product_counts = receipt['retail_product_name'].value_counts()
         products_in_cart = set(receipt['retail_product_name'].values)
         
@@ -273,8 +304,15 @@ def load_and_preprocess(filepath='ap_dataset.csv'):
             row[f'count_{p}'] = product_counts.get(p, 0)
             row[f'has_{p}'] = 1 if p in products_in_cart else 0
         
+        # features de interactiune
+        count_cs = product_counts.get(TARGET_PRODUCT, 0)
+        for s in sides:
+            count_s = product_counts.get(s, 0)
+            row[f'interact_CrazySchnitzel_x_{s}'] = count_cs * count_s
+        
         row['has_any_side'] = 1 if any(s in products_in_cart for s in sides) else 0
         row['has_any_drink'] = 1 if any(d in products_in_cart for d in drinks) else 0
+        row['interact_side_x_drink'] = row['has_any_side'] * row['has_any_drink']
         
         data.append(row)
     
@@ -285,6 +323,9 @@ def load_and_preprocess(filepath='ap_dataset.csv'):
     print(f"\nDistributie target:")
     print(f"  y=1 (cu {TARGET_SAUCE}): {pos} ({100*pos/len(df_final):.1f}%)")
     print(f"  y=0 (fara {TARGET_SAUCE}): {neg} ({100*neg/len(df_final):.1f}%)")
+    
+    feature_cols = [c for c in df_final.columns if c != 'y']
+    print(f"\nTotal features: {len(feature_cols)}")
     
     return df_final
 
@@ -306,16 +347,23 @@ if __name__ == "__main__":
     X_train, y_train = df_train[feature_cols].values, df_train['y'].values
     X_test, y_test = df_test[feature_cols].values, df_test['y'].values
     
+    print(f"Dimensiune X_train: {X_train.shape}")
+    print(f"Dimensiune X_test: {X_test.shape}")
+    
+    # normalizare z-score
     mu, sigma = X_train.mean(axis=0), X_train.std(axis=0)
     sigma[sigma == 0] = 1
     X_train_n = (X_train - mu) / sigma
     X_test_n = (X_test - mu) / sigma
     
-    # baseline
+    # baseline - clasa majoritara
     majority = np.bincount(y_train).argmax()
     baseline_pred = np.full_like(y_test, majority)
     baseline_acc = np.mean(y_test == baseline_pred)
-    print(f"\nBASELINE (clasa majoritara = {majority}): Accuracy = {baseline_acc:.4f}")
+    print(f"\n{'='*50}")
+    print(f"BASELINE (clasa majoritara = {majority})")
+    print(f"{'='*50}")
+    print(f"Accuracy: {baseline_acc:.4f}")
     
     # gradient descent
     print(f"\n{'='*50}")
@@ -350,7 +398,38 @@ if __name__ == "__main__":
     plot_loss(model_gd.loss_history)
     plot_roc(results_gd['fpr'], results_gd['tpr'], results_gd['auc'])
     plot_confusion_matrix(results_gd['cm'])
+    importance = plot_coefficients(model_gd.w, feature_cols, top_n=20)
     
-    print("\n" + "="*60)
-    print("TODO Ziua 5: Adaugare interpretare coeficienti + finalizare")
-    print("="*60)
+    # interpretare coeficienti
+    print(f"\n{'='*50}")
+    print("INTERPRETARE COEFICIENTI")
+    print('='*50)
+    
+    print("\nTop 10 features care CRESC probabilitatea de Crazy Sauce:")
+    top_pos = importance[importance['coef'] > 0].head(10)
+    for i, (_, row) in enumerate(top_pos.iterrows(), 1):
+        print(f"  {i:2d}. {row['feature']}: +{row['coef']:.4f}")
+    
+    print("\nTop 10 features care SCAD probabilitatea de Crazy Sauce:")
+    top_neg = importance[importance['coef'] < 0].head(10)
+    for i, (_, row) in enumerate(top_neg.iterrows(), 1):
+        print(f"  {i:2d}. {row['feature']}: {row['coef']:.4f}")
+    
+    # comparatie finala
+    print(f"\n{'='*50}")
+    print("COMPARATIE FINALA")
+    print('='*50)
+    print(f"{'Metoda':<25} {'Accuracy':>10} {'F1':>10} {'ROC-AUC':>10}")
+    print("-"*55)
+    print(f"{'Baseline (majoritar)':<25} {baseline_acc:>10.4f} {'N/A':>10} {'N/A':>10}")
+    print(f"{'LR Gradient Descent':<25} {results_gd['accuracy']:>10.4f} {results_gd['f1']:>10.4f} {results_gd['auc']:>10.4f}")
+    print(f"{'LR Metoda Newton':<25} {results_newton['accuracy']:>10.4f} {results_newton['f1']:>10.4f} {results_newton['auc']:>10.4f}")
+    
+    print(f"\n{'='*50}")
+    print("TASK 2.1 COMPLET!")
+    print('='*50)
+    print("Fisiere generate:")
+    print("  - 2_1_loss_curve.png")
+    print("  - 2_1_roc_curve.png")
+    print("  - 2_1_confusion_matrix.png")
+    print("  - 2_1_coefficients.png")
