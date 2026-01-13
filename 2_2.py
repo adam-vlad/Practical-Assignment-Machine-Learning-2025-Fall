@@ -61,9 +61,6 @@ class LogisticRegression:
             loss = self._loss(y, y_pred)
             self.loss_history.append(loss)
             
-            if verbose and i % 200 == 0:
-                print(f"    Iter {i:4d}: loss = {loss:.6f}")
-            
             if i > 0 and abs(self.loss_history[-2] - self.loss_history[-1]) < self.tol:
                 break
         
@@ -87,6 +84,19 @@ def f1_score(y_true, y_pred):
     precision = tp / (tp + fp) if (tp + fp) > 0 else 0
     recall = tp / (tp + fn) if (tp + fn) > 0 else 0
     return 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+
+
+def hit_at_k(recommended, actual, k):
+    top_k = recommended[:k]
+    return 1 if any(s in actual for s in top_k) else 0
+
+
+def precision_at_k(recommended, actual, k):
+    top_k = recommended[:k]
+    if len(top_k) == 0:
+        return 0
+    hits = sum(1 for s in top_k if s in actual)
+    return hits / len(top_k)
 
 
 def load_data(filepath='ap_dataset.csv'):
@@ -152,6 +162,10 @@ def create_features_for_sauce(df, target_sauce, sides, drinks, schnitzels):
         row['has_any_drink'] = 1 if any(d in products_in_cart for d in drinks) else 0
         row['has_any_schnitzel'] = 1 if any(s in products_in_cart for s in schnitzels) else 0
         
+        # interactiuni
+        row['interact_schnitzel_x_side'] = row['has_any_schnitzel'] * row['has_any_side']
+        row['interact_schnitzel_x_drink'] = row['has_any_schnitzel'] * row['has_any_drink']
+        
         data.append(row)
     
     return pd.DataFrame(data), products_for_features
@@ -162,6 +176,118 @@ def train_test_split(df, test_size=0.2, seed=42):
     idx = np.random.permutation(len(df))
     split = int(len(df) * (1 - test_size))
     return df.iloc[idx[:split]].copy(), df.iloc[idx[split:]].copy()
+
+
+class SauceRecommender:
+    """Antrenam cate un model LR pentru fiecare sos si le folosim pentru recomandari."""
+    
+    def __init__(self):
+        self.models = {}
+        self.norm_params = {}
+        self.feature_cols = {}
+        self.sauce_popularity = {}
+        self.sides = []
+        self.drinks = []
+        self.schnitzels = []
+        self.all_products = []
+    
+    def fit(self, df, sauce_freq, verbose=True):
+        self.sauce_popularity = sauce_freq
+        self.all_products = df['retail_product_name'].unique()
+        
+        self.sides, self.drinks, self.schnitzels = identify_product_categories(df)
+        
+        if verbose:
+            print("\n" + "="*60)
+            print("ANTRENARE MODELE PENTRU FIECARE SOS")
+            print("="*60)
+        
+        for sauce in SAUCES:
+            if sauce_freq.get(sauce, 0) == 0:
+                continue
+            
+            if verbose:
+                print(f"\n>>> Antrenare: {sauce}")
+            
+            df_features, _ = create_features_for_sauce(
+                df, sauce, self.sides, self.drinks, self.schnitzels
+            )
+            
+            df_train, df_val = train_test_split(df_features, test_size=0.2)
+            
+            feature_cols = [c for c in df_features.columns 
+                           if c not in ['id_bon', 'y', 'actual_sauces']]
+            
+            X_train = df_train[feature_cols].values.astype(float)
+            y_train = df_train['y'].values
+            
+            n_pos = y_train.sum()
+            if verbose:
+                print(f"    Exemple pozitive: {n_pos}/{len(y_train)}")
+            
+            if n_pos == 0:
+                continue
+            
+            mu = X_train.mean(axis=0)
+            sigma = X_train.std(axis=0)
+            sigma[sigma == 0] = 1
+            X_train_n = (X_train - mu) / sigma
+            
+            model = LogisticRegression(lr=0.1, n_iter=500, reg='l2', lambda_=0.01)
+            model.fit(X_train_n, y_train, verbose=False)
+            
+            self.models[sauce] = model
+            self.norm_params[sauce] = {'mu': mu, 'sigma': sigma}
+            self.feature_cols[sauce] = feature_cols
+        
+        if verbose:
+            print(f"\nModele antrenate: {len(self.models)}/{len(SAUCES)} sosuri")
+    
+    def recommend_baseline(self, exclude_sauces=None, top_k=3):
+        if exclude_sauces is None:
+            exclude_sauces = []
+        
+        ranking = sorted(self.sauce_popularity.items(), key=lambda x: x[1], reverse=True)
+        return [s for s, c in ranking if s not in exclude_sauces][:top_k]
+
+
+def evaluate_recommender(recommender, df, k_values=[1, 3, 5]):
+    print("\n" + "="*60)
+    print("EVALUARE SISTEM DE RECOMANDARE (doar baseline)")
+    print("="*60)
+    
+    results = {k: {'hit_baseline': [], 'precision_baseline': []} for k in k_values}
+    
+    receipts = df['id_bon'].unique()
+    n_with_sauce = 0
+    
+    for id_bon in receipts:
+        df_receipt = df[df['id_bon'] == id_bon]
+        products_in_cart = list(df_receipt['retail_product_name'].values)
+        actual_sauces = [s for s in SAUCES if s in products_in_cart]
+        
+        if len(actual_sauces) == 0:
+            continue
+        
+        for target_sauce in actual_sauces:
+            exclude = [s for s in SAUCES if s in products_in_cart and s != target_sauce]
+            
+            rec_baseline = recommender.recommend_baseline(exclude_sauces=exclude, top_k=max(k_values))
+            
+            for k in k_values:
+                results[k]['hit_baseline'].append(hit_at_k(rec_baseline, [target_sauce], k))
+                results[k]['precision_baseline'].append(precision_at_k(rec_baseline, [target_sauce], k))
+            n_with_sauce += 1
+    
+    print(f"Bonuri cu cel putin un sos in test: {n_with_sauce}")
+    
+    print("\n" + "-"*60)
+    for k in k_values:
+        h = np.mean(results[k]['hit_baseline'])
+        p = np.mean(results[k]['precision_baseline'])
+        print(f"K={k}: Hit@K = {h:.4f}, Precision@K = {p:.4f}")
+    
+    return results
 
 
 if __name__ == "__main__":
@@ -175,59 +301,15 @@ if __name__ == "__main__":
     df_train, df_test = split_receipts(df, test_size=0.2, seed=42)
     print(f"Train: {df_train['id_bon'].nunique()} bonuri, Test: {df_test['id_bon'].nunique()} bonuri")
     
-    sides, drinks, schnitzels = identify_product_categories(df)
+    sauce_freq_train = {s: df_train[df_train['retail_product_name'] == s]['id_bon'].nunique()
+                        for s in SAUCES}
+    
+    recommender = SauceRecommender()
+    recommender.fit(df_train, sauce_freq_train, verbose=True)
+    
+    k_values = [1, 3, 5]
+    results = evaluate_recommender(recommender, df_test, k_values)
     
     print("\n" + "="*60)
-    print("ANTRENARE MODELE PENTRU FIECARE SOS")
-    print("="*60)
-    
-    models = {}
-    
-    for sauce in SAUCES:
-        if sauce_freq.get(sauce, 0) == 0:
-            print(f"\n[SKIP] {sauce} - nu exista in date")
-            continue
-        
-        print(f"\n>>> Antrenare: {sauce}")
-        
-        df_features, _ = create_features_for_sauce(df_train, sauce, sides, drinks, schnitzels)
-        df_tr, df_val = train_test_split(df_features, test_size=0.2)
-        
-        feature_cols = [c for c in df_features.columns if c not in ['id_bon', 'y', 'actual_sauces']]
-        
-        X_train = df_tr[feature_cols].values.astype(float)
-        y_train = df_tr['y'].values
-        
-        n_pos = y_train.sum()
-        print(f"    Exemple pozitive: {n_pos}/{len(y_train)} ({100*n_pos/len(y_train):.1f}%)")
-        
-        if n_pos == 0:
-            print(f"    [SKIP] 0 exemple pozitive")
-            continue
-        
-        # normalizare
-        mu = X_train.mean(axis=0)
-        sigma = X_train.std(axis=0)
-        sigma[sigma == 0] = 1
-        X_train_n = (X_train - mu) / sigma
-        
-        model = LogisticRegression(lr=0.1, n_iter=500, reg='l2', lambda_=0.01)
-        model.fit(X_train_n, y_train, verbose=False)
-        
-        # validare
-        X_val = df_val[feature_cols].values.astype(float)
-        y_val = df_val['y'].values
-        X_val_n = (X_val - mu) / sigma
-        y_pred = model.predict(X_val_n)
-        acc = accuracy(y_val, y_pred)
-        f1 = f1_score(y_val, y_pred)
-        
-        print(f"    Validare - Accuracy: {acc:.4f}, F1: {f1:.4f}")
-        
-        models[sauce] = {'model': model, 'mu': mu, 'sigma': sigma, 'feature_cols': feature_cols}
-    
-    print(f"\nModele antrenate: {len(models)}/{len(SAUCES)} sosuri")
-    
-    print("\n" + "="*60)
-    print("TODO Ziua 6: Implementare sistem de recomandare + evaluare")
+    print("TODO Ziua 7: Adaugare recomandari cu model + grafice + finalizare")
     print("="*60)
