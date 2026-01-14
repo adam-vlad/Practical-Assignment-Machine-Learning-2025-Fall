@@ -1,9 +1,0 @@
-ZIUA 6
-Fisiere: 2_2_ziua4.py, 3_ziua3.py
---------------------------------------------------------------------------------
-Summary: Sauce recommender + ID3 decision tree impl
-Description:
-- Task 2.2: Clasa SauceRecommender completa
-- Task 2.2: Metrici Hit@K, Precision@K pentru recomandari
-- Task 3: Implementare completa DecisionTreeID3
-- Task 3: Algoritm ID3 cu information gain si entropy
